@@ -2,405 +2,362 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const path = require('path');
-const crypto = require('crypto');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
+// 中间件
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 初始化数据库
-const db = new sqlite3.Database('./game.db', (err) => {
-    if (err) console.error('Database error:', err);
-    console.log('Connected to SQLite database');
+// 数据库初始化
+const db = new sqlite3.Database('./guess_game.db', (err) => {
+    if (err) console.error('数据库连接失败:', err);
+    else console.log('数据库连接成功');
 });
 
-// 创建用户表
-db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    nickname TEXT NOT NULL,
-    score INTEGER DEFAULT 0,
-    is_admin INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`);
-
-// 创建猜词记录表
-db.run(`CREATE TABLE IF NOT EXISTS guess_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    word TEXT,
-    guess TEXT,
-    similarity INTEGER,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-)`);
-
-// 密码加密
-function hashPassword(password) {
-    return crypto.createHash('md5').update(password).digest('hex');
-}
-
-// 注册接口
-app.post('/api/register', (req, res) => {
-    const { username, password, nickname } = req.body;
-    const hashedPassword = hashPassword(password);
-    
-    db.run('INSERT INTO users (username, password, nickname) VALUES (?, ?, ?)', 
-        [username, hashedPassword, nickname], 
-        function(err) {
-            if (err) {
-                return res.json({ success: false, message: '用户名已存在' });
-            }
-            res.json({ success: true, userId: this.lastID, nickname });
-        });
-});
-
-// 登录接口
-app.post('/api/login', (req, res) => {
-    const { username, password } = req.body;
-    const hashedPassword = hashPassword(password);
-    
-    db.get('SELECT id, nickname, score, is_admin FROM users WHERE username = ? AND password = ?', 
-        [username, hashedPassword], 
-        (err, user) => {
-            if (err || !user) {
-                return res.json({ success: false, message: '用户名或密码错误' });
-            }
-            res.json({ success: true, user });
-        });
-});
-
-// 获取排行榜
-app.get('/api/leaderboard', (req, res) => {
-    db.all('SELECT id, nickname, score FROM users WHERE score > 0 ORDER BY score DESC LIMIT 20', 
-        (err, rows) => {
-            res.json({ success: true, list: rows || [] });
-        });
-});
-
-// 更新分数
-app.post('/api/update-score', (req, res) => {
-    const { userId, addScore } = req.body;
-    db.run('UPDATE users SET score = score + ? WHERE id = ?', [addScore, userId], (err) => {
-        if (err) return res.json({ success: false });
-        db.get('SELECT score FROM users WHERE id = ?', [userId], (err, user) => {
-            res.json({ success: true, newScore: user.score });
-        });
-    });
-});
-
-// 智能相关度计算（备用算法）
-function calculateSimilarity(word, guess, category) {
-    word = word.toLowerCase();
-    guess = guess.toLowerCase();
-    
-    if (word === guess) return 100;
-    
-    // 高相关关键词
-    const highRelated = {
-        '自然': ['天空', '大地', '山', '水', '风', '雨', '云', '太阳', '月亮', '星星', '树', '花', '草', '森林', '海洋', '河流', '天气', '季节'],
-        '动物': ['狗', '猫', '鸟', '鱼', '虫', '兽', '宠物', '野生', '动物园', '羽毛', '翅膀', '尾巴', '爪子'],
-        '物品': ['桌子', '椅子', '杯子', '手机', '电脑', '书', '笔', '衣服', '鞋子', '工具', '家具', '电器'],
-        '人物': ['爸爸', '妈妈', '老师', '学生', '医生', '警察', '朋友', '家人', '男人', '女人', '孩子', '老人'],
-        '抽象': ['爱', '快乐', '悲伤', '时间', '梦想', '希望', '自由', '幸福', '勇敢', '智慧', '美丽', '善良']
-    };
-    
-    // 中相关关键词
-    const midRelated = {
-        '自然': ['绿色', '蓝色', '白色', '空气', '泥土', '石头', '叶子', '种子'],
-        '动物': ['可爱', '凶猛', '温顺', '奔跑', '飞翔', '游泳', '食物'],
-        '物品': ['使用', '购买', '价格', '质量', '颜色', '大小', '形状'],
-        '人物': ['工作', '学习', '生活', '说话', '走路', '吃饭', '睡觉'],
-        '抽象': ['感觉', '想法', '心情', '思想', '精神', '心灵', '人生']
-    };
-    
-    const categoryWords = highRelated[category] || [];
-    const midWords = midRelated[category] || [];
-    
-    // 检查高相关
-    for (let w of categoryWords) {
-        if (guess.includes(w) || w.includes(guess)) {
-            return 50 + Math.floor(Math.random() * 20); // 50-69
-        }
-    }
-    
-    // 检查中相关
-    for (let w of midWords) {
-        if (guess.includes(w) || w.includes(guess)) {
-            return 30 + Math.floor(Math.random() * 15); // 30-44
-        }
-    }
-    
-    // 包含目标词的字
-    let commonChars = 0;
-    for (let c of guess) {
-        if (word.includes(c)) commonChars++;
-    }
-    if (commonChars >= 2) {
-        return 25 + Math.floor(Math.random() * 15); // 25-39
-    }
-    
-    // 完全不相关
-    return 5 + Math.floor(Math.random() * 20); // 5-25
-}
-
-// 相关度计算接口
-app.post('/api/calc-similarity', async (req, res) => {
-    const { word, guess, category } = req.body;
-    
-    try {
-        // 这里可以接入真实大模型API
-        // 目前使用优化的备用算法
-        const similarity = calculateSimilarity(word, guess, category);
-        res.json({ success: true, similarity });
-    } catch (e) {
-        // 出错时使用备用算法
-        const similarity = calculateSimilarity(word, guess, category);
-        res.json({ success: true, similarity });
-    }
-});
-
-// 段位计算
-function getRank(score) {
-    if (score < 2) return { name: '青铜Ⅲ', color: '#CD7F32' };
-    if (score < 4) return { name: '青铜Ⅱ', color: '#CD7F32' };
-    if (score < 6) return { name: '青铜Ⅰ', color: '#CD7F32' };
-    if (score < 9) return { name: '白银Ⅲ', color: '#C0C0C0' };
-    if (score < 12) return { name: '白银Ⅱ', color: '#C0C0C0' };
-    if (score < 16) return { name: '白银Ⅰ', color: '#C0C0C0' };
-    if (score < 21) return { name: '黄金Ⅲ', color: '#FFD700' };
-    if (score < 26) return { name: '黄金Ⅱ', color: '#FFD700' };
-    if (score < 31) return { name: '黄金Ⅰ', color: '#FFD700' };
-    if (score < 41) return { name: '钻石Ⅲ', color: '#B9F2FF' };
-    if (score < 51) return { name: '钻石Ⅱ', color: '#B9F2FF' };
-    return { name: '钻石Ⅰ', color: '#B9F2FF' };
-}
-
-app.get('/api/rank/:score', (req, res) => {
-    res.json(getRank(parseInt(req.params.score) || 0));
-});
-
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
-const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
-const cors = require('cors');
-const path = require('path');
-const crypto = require('crypto');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
-const db = new sqlite3.Database('./guess_game.db');
-
+// 创建表
 db.serialize(() => {
+    // 用户表（添加管理员权限字段）
     db.run(`CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
         nickname TEXT NOT NULL,
-        score INTEGER DEFAULT 0,
+        total_score INTEGER DEFAULT 0,
+        season_score INTEGER DEFAULT 0,
+        current_season TEXT NOT NULL,
         is_admin INTEGER DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
+    // 兼容旧数据库：添加is_admin字段
+    db.run(`ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0`, (err) => {});
 
-    db.run(`CREATE TABLE IF NOT EXISTS game_records (
+    // 猜词记录表
+    db.run(`CREATE TABLE IF NOT EXISTS guess_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+        user_id INTEGER NOT NULL,
         target_word TEXT NOT NULL,
-        category TEXT NOT NULL,
-        guessed_word TEXT NOT NULL,
+        guess_word TEXT NOT NULL,
         similarity INTEGER NOT NULL,
+        used_time INTEGER NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
     )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS seasons (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        start_date DATE NOT NULL,
-        end_date DATE NOT NULL,
-        name TEXT NOT NULL
-    )`);
 });
 
-function hashPassword(password) {
-    return crypto.createHash('sha256').update(password).digest('hex');
+// 段位配置（细分小段位）
+const levels = [
+    {name: "青铜Ⅲ", min: 0, max: 1},
+    {name: "青铜Ⅱ", min: 2, max: 3},
+    {name: "青铜Ⅰ", min: 4, max: 5},
+    {name: "白银Ⅲ", min: 6, max: 8},
+    {name: "白银Ⅱ", min: 9, max: 11},
+    {name: "白银Ⅰ", min: 12, max: 15},
+    {name: "黄金Ⅲ", min: 16, max: 20},
+    {name: "黄金Ⅱ", min: 21, max: 25},
+    {name: "黄金Ⅰ", min: 26, max: 30},
+    {name: "钻石Ⅲ", min: 31, max: 40},
+    {name: "钻石Ⅱ", min: 41, max: 50},
+    {name: "钻石Ⅰ", min: 51, max: 9999}
+];
+
+// 获取当前赛季（每年第N周，每周一重置）
+function getCurrentSeason() {
+    const now = new Date();
+    const firstDayOfYear = new Date(now.getFullYear(), 0, 1);
+    const pastDaysOfYear = (now - firstDayOfYear) / 86400000;
+    const weekNum = Math.ceil((pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7);
+    return `${now.getFullYear()}-${weekNum}`;
 }
 
-const wordDatabase = {
-    '自然': ['太阳', '月亮', '星星', '云朵', '彩虹', '雨水', '雪花', '雷电', '风', '山', '海', '河', '湖', '森林', '沙漠', '草原', '瀑布', '火山', '地震', '海啸'],
-    '动物': ['老虎', '狮子', '大象', '熊猫', '猴子', '狗', '猫', '马', '牛', '羊', '鸡', '鸭', '鱼', '鸟', '蛇', '龙', '凤凰', '独角兽', '恐龙', '鲸鱼'],
-    '物品': ['手机', '电脑', '电视', '冰箱', '空调', '洗衣机', '汽车', '飞机', '火车', '自行车', '手表', '眼镜', '钥匙', '钱包', '杯子', '筷子', '碗', '盘子', '刀', '笔'],
-    '人物': ['爸爸', '妈妈', '爷爷', '奶奶', '老师', '医生', '警察', '消防员', '厨师', '司机', '歌手', '演员', '画家', '作家', '科学家', '宇航员', '运动员', '老板', '员工', '朋友'],
-    '抽象': ['爱情', '友情', '亲情', '幸福', '快乐', '悲伤', '愤怒', '害怕', '希望', '梦想', '时间', '生命', '死亡', '自由', '正义', '和平', '美丽', '丑陋', '聪明', '勇敢']
-};
-
-function getRandomWord() {
-    const categories = Object.keys(wordDatabase);
-    const category = categories[Math.floor(Math.random() * categories.length)];
-    const words = wordDatabase[category];
-    const word = words[Math.floor(Math.random() * words.length)];
-    return { word, category };
+// 计算段位
+function getLevel(score) {
+    for (let level of levels) {
+        if (score >= level.min && score <= level.max) {
+            return level.name;
+        }
+    }
+    return "钻石Ⅰ";
 }
 
-function calculateSimilarityFallback(guess, target, category) {
-    const guessLower = guess.toLowerCase();
-    const targetLower = target.toLowerCase();
+// ====================== 核心：真实大模型智能语义相关度判断 ======================
+// 豆包大模型API配置
+const DOUBAO_API_KEY = "191b8b3e-1141-4e63-850f-57d40482082f";
+const DOUBAO_MODEL = "ep-20250613151228-q5wqz";
+
+// 调用豆包大模型进行语义相似度判断
+async function aiCalcSimilarity(guessWord, targetWord, category) {
+    // 完全匹配直接返回
+    if (guessWord === targetWord) return 100;
     
-    if (guessLower === targetLower) return 100;
+    // 包含关系
+    if (guessWord.includes(targetWord) || targetWord.includes(guessWord)) return 85;
+
+    try {
+        // 调用大模型API
+        const response = await fetch(`https://ark.cn-beijing.volces.com/api/v3/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${DOUBAO_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: DOUBAO_MODEL,
+                messages: [
+                    {
+                        role: "system",
+                        content: `你是一个语义相似度判断专家。请判断词语"${guessWord}"和目标词语"${targetWord}"的语义关联程度，属于${category}大类。
+                        输出要求：只输出一个0-99之间的整数数字，不要输出任何其他内容。
+                        判断标准：
+                        - 80-99：语义高度相关，直接近义词或强关联
+                        - 50-79：语义中度相关，同领域或有明显关联
+                        - 20-49：语义低度相关，弱关联或同大类
+                        - 0-19：几乎不相关`
+                    },
+                    {
+                        role: "user",
+                        content: `判断"${guessWord}"和"${targetWord}"的语义相关度`
+                    }
+                ],
+                temperature: 0.1,
+                max_tokens: 10
+            })
+        });
+
+        const data = await response.json();
+        const result = data.choices[0].message.content.trim();
+        const similarity = parseInt(result);
+        
+        // 校验返回值
+        if (!isNaN(similarity) && similarity >= 0 && similarity <= 99) {
+            return similarity;
+        }
+    } catch (e) {
+        console.log("大模型调用失败，使用备用算法:", e.message);
+    }
+
+    // 备用算法（API调用失败时使用）
+    const semanticKB = {
+        "太阳": {high: ["阳光", "日光", "晴天", "日出", "日落"], medium: ["天空", "白天", "光明", "温暖"]},
+        "月亮": {high: ["月光", "月色", "月圆"], medium: ["夜晚", "星星", "天空", "中秋"]},
+        "星星": {high: ["星光", "星辰", "星座"], medium: ["夜空", "月亮", "天空", "银河"]},
+        "大海": {high: ["海洋", "海水", "海浪", "沙滩"], medium: ["蓝色", "鲸鱼", "海豚"]},
+        "梦想": {high: ["理想", "目标", "愿望"], medium: ["未来", "希望", "追求"]}
+    };
+
+    const wordData = semanticKB[targetWord];
+    if (wordData) {
+        if (wordData.high?.includes(guessWord)) return 75;
+        if (wordData.medium?.includes(guessWord)) return 50;
+    }
     
-    const keywords = {
-        '自然': {
-            high: ['天空', '天气', '大地', '自然', '环境'],
-            medium: ['光', '水', '土', '火', '气', '云', '雨', '风', '山', '海']
+    // 优化备用算法：根据大类智能判断，不再返回固定值
+    const categoryMap = {
+        "自然类": {
+            high: ["天", "地", "山", "水", "风", "雨", "云", "雪", "日", "月", "星", "海", "河", "湖", "森"],
+            medium: ["大", "小", "白", "黑", "红", "绿", "蓝", "黄", "金", "银"]
         },
-        '动物': {
-            high: ['动物', '生物', '宠物', '野兽', '鸟类', '鱼类'],
-            medium: ['毛', '尾巴', '翅膀', '脚', '眼睛', '嘴']
+        "动物类": {
+            high: ["猫", "狗", "鸟", "鱼", "虫", "兽", "虎", "狮", "熊", "象", "鹿", "马", "牛", "羊", "鸡"],
+            medium: ["小", "大", "白", "黑", "花", "野", "动", "宠"]
         },
-        '物品': {
-            high: ['东西', '物品', '工具', '电器', '家具', '交通工具'],
-            medium: ['用', '拿', '放', '看', '听', '写']
+        "物品类": {
+            high: ["机", "电", "书", "笔", "纸", "桌", "椅", "床", "门", "窗", "车", "房", "杯", "瓶", "包"],
+            medium: ["小", "大", "电", "子", "用", "品", "家"]
         },
-        '人物': {
-            high: ['人', '人物', '职业', '身份', '家人', '角色'],
-            medium: ['男', '女', '老', '少', '工作', '做事']
+        "人物类": {
+            high: ["人", "师", "生", "医", "工", "农", "兵", "警", "员", "家", "者", "手", "王", "星", "导"],
+            medium: ["老", "小", "男", "女", "职", "业", "工"]
         },
-        '抽象': {
-            high: ['感情', '感觉', '情绪', '思想', '概念', '精神'],
-            medium: ['心', '想', '感觉', '心情', '状态']
+        "抽象类": {
+            high: ["心", "情", "感", "思", "想", "梦", "爱", "友", "信", "望", "勇", "智", "自", "由", "幸"],
+            medium: ["好", "美", "快", "乐", "悲", "伤", "孤", "独", "时", "间"]
         }
     };
-    
-    const catKeywords = keywords[category] || keywords['物品'];
-    
-    for (const kw of catKeywords.high) {
-        if (guessLower.includes(kw) || kw.includes(guessLower)) {
-            return 50 + Math.floor(Math.random() * 20);
+
+    // 根据大类智能评分
+    const catData = categoryMap[category];
+    if (catData) {
+        // 检查是否有高相关字
+        for (let c of guessWord) {
+            if (catData.high.includes(c)) return Math.floor(Math.random() * 20) + 50; // 50-69
+        }
+        // 检查是否有中相关字
+        for (let c of guessWord) {
+            if (catData.medium.includes(c)) return Math.floor(Math.random() * 15) + 30; // 30-44
         }
     }
-    
-    for (const kw of catKeywords.medium) {
-        if (guessLower.includes(kw) || kw.includes(guessLower)) {
-            return 30 + Math.floor(Math.random() * 15);
-        }
+
+    // 同字匹配加分
+    let sameChar = 0;
+    let targetChars = new Set(targetWord.split(''));
+    for (let c of guessWord) {
+        if (targetChars.has(c)) sameChar++;
     }
-    
-    let commonChars = 0;
-    for (const char of guessLower) {
-        if (targetLower.includes(char)) commonChars++;
-    }
-    
-    if (commonChars > 0) {
-        return 15 + Math.floor(Math.random() * 15);
-    }
-    
-    return 5 + Math.floor(Math.random() * 20);
+    if (sameChar > 0) return Math.min(80, sameChar * 20 + Math.floor(Math.random() * 10));
+
+    // 完全不相关：随机返回 5-25，避免全部一样
+    return Math.floor(Math.random() * 21) + 5;
 }
 
-app.post('/api/register', (req, res) => {
-    const { username, password, nickname } = req.body;
-    
-    if (!username || !password || !nickname) {
-        return res.json({ success: false, message: '请填写完整信息' });
-    }
-    
-    const hashedPassword = hashPassword(password);
-    
-    db.run('INSERT INTO users (username, password, nickname) VALUES (?, ?, ?)', 
-        [username, hashedPassword, nickname], 
-        function(err) {
-            if (err) {
-                return res.json({ success: false, message: '用户名已存在' });
-            }
-            res.json({ success: true, userId: this.lastID, nickname });
-        });
-});
+// ====================== API接口 ======================
 
-app.post('/api/login', (req, res) => {
-    const { username, password } = req.body;
-    
-    if (!username || !password) {
-        return res.json({ success: false, message: '请填写完整信息' });
+// 注册接口
+app.post('/api/register', (req, res) => {
+    const {username, password, nickname} = req.body;
+    if (!username || !password || !nickname) {
+        return res.json({success: false, msg: '请填写完整信息'});
     }
+    if (username.length < 3) return res.json({success: false, msg: '用户名至少3位'});
+    if (password.length < 6) return res.json({success: false, msg: '密码至少6位'});
+
+    const currentSeason = getCurrentSeason();
     
-    const hashedPassword = hashPassword(password);
-    
-    db.get('SELECT * FROM users WHERE username = ? AND password = ?', 
-        [username, hashedPassword], 
-        (err, user) => {
-            if (err || !user) {
-                return res.json({ success: false, message: '用户名或密码错误' });
-            }
-            res.json({ 
-                success: true, 
-                userId: user.id, 
-                nickname: user.nickname,
-                score: user.score,
-                isAdmin: user.is_admin
+    // 检查用户名是否已存在
+    db.get('SELECT id FROM users WHERE username = ?', [username], (err, user) => {
+        if (user) return res.json({success: false, msg: '用户名已存在'});
+        
+        // 注册新用户
+        db.run('INSERT INTO users (username, password, nickname, current_season) VALUES (?, ?, ?, ?)', 
+            [username, password, nickname, currentSeason], function(err) {
+            if (err) return res.json({success: false, msg: '注册失败'});
+            res.json({
+                success: true,
+                msg: '注册成功！',
+                user: {
+                    id: this.lastID,
+                    nickname,
+                    seasonScore: 0,
+                    totalScore: 0,
+                    level: "青铜Ⅲ",
+                    currentSeason,
+                    isAdmin: 0
+                }
             });
         });
+    });
 });
 
-app.get('/api/random-word', (req, res) => {
-    const result = getRandomWord();
-    res.json(result);
+// 登录接口
+app.post('/api/login', (req, res) => {
+    const {username, password} = req.body;
+    if (!username || !password) {
+        return res.json({success: false, msg: '请输入用户名和密码'});
+    }
+
+    const currentSeason = getCurrentSeason();
+    
+    db.get('SELECT * FROM users WHERE username = ? AND password = ?', [username, password], (err, user) => {
+        if (err) return res.json({success: false, msg: '数据库错误'});
+        if (!user) return res.json({success: false, msg: '用户名或密码错误'});
+
+        // 检查赛季是否更新
+        if (user.current_season !== currentSeason) {
+            db.run('UPDATE users SET season_score = 0, current_season = ? WHERE id = ?', [currentSeason, user.id], () => {
+                res.json({
+                    success: true,
+                    user: {
+                        id: user.id,
+                        nickname: user.nickname,
+                        seasonScore: 0,
+                        totalScore: user.total_score,
+                        level: getLevel(0),
+                        currentSeason,
+                        isAdmin: user.is_admin || 0
+                    }
+                });
+            });
+        } else {
+            res.json({
+                success: true,
+                user: {
+                    id: user.id,
+                    nickname: user.nickname,
+                    seasonScore: user.season_score,
+                    totalScore: user.total_score,
+                    level: getLevel(user.season_score),
+                    currentSeason,
+                    isAdmin: user.is_admin || 0
+                }
+            });
+        }
+    });
 });
 
+// 计算相关度接口（核心AI功能）
 app.post('/api/calc-similarity', async (req, res) => {
-    const { guess, target, category } = req.body;
+    const {guessWord, targetWord, category} = req.body;
     
-    const similarity = calculateSimilarityFallback(guess, target, category);
-    res.json({ similarity });
-});
-
-app.post('/api/save-record', (req, res) => {
-    const { userId, targetWord, category, guessedWord, similarity } = req.body;
+    // 调用AI语义判断
+    const similarity = await aiCalcSimilarity(guessWord, targetWord, category);
     
-    db.run('INSERT INTO game_records (user_id, target_word, category, guessed_word, similarity) VALUES (?, ?, ?, ?, ?)',
-        [userId, targetWord, category, guessedWord, similarity],
-        function(err) {
-            if (err) {
-                return res.json({ success: false });
-            }
+    res.json({
+        success: true,
+        similarity: similarity
+    });
+});
+
+// 猜对后更新分数
+app.post('/api/guess-success', (req, res) => {
+    const {userId, targetWord, usedTime} = req.body;
+    if (!userId) return res.json({success: false, msg: '用户未登录'});
+
+    const currentSeason = getCurrentSeason();
+    
+    db.serialize(() => {
+        // 更新用户分数
+        db.run('UPDATE users SET season_score = season_score + 1, total_score = total_score + 1 WHERE id = ?', [userId], (err) => {
+            if (err) return res.json({success: false, msg: '更新失败'});
             
-            if (similarity === 100) {
-                db.run('UPDATE users SET score = score + 1 WHERE id = ?', [userId]);
-            }
-            
-            res.json({ success: true, recordId: this.lastID });
+            // 返回最新用户信息
+            db.get('SELECT * FROM users WHERE id = ?', [userId], (err, user) => {
+                res.json({
+                    success: true,
+                    user: {
+                        id: user.id,
+                        nickname: user.nickname,
+                        seasonScore: user.season_score,
+                        totalScore: user.total_score,
+                        level: getLevel(user.season_score),
+                        currentSeason,
+                        isAdmin: user.is_admin || 0
+                    }
+                });
+            });
         });
+    });
 });
 
-app.get('/api/leaderboard', (req, res) => {
-    db.all('SELECT nickname, score FROM users WHERE score > 0 ORDER BY score DESC LIMIT 20', 
-        (err, rows) => {
-            if (err) {
-                return res.json([]);
-            }
-            res.json(rows);
+// 获取排行榜
+app.get('/api/rank', (req, res) => {
+    const currentSeason = getCurrentSeason();
+    db.all(`
+        SELECT nickname, season_score as score 
+        FROM users 
+        WHERE current_season = ? AND season_score > 0
+        ORDER BY season_score DESC 
+        LIMIT 20
+    `, [currentSeason], (err, list) => {
+        if (err) return res.json({success: false, msg: '获取排行榜失败'});
+        res.json({
+            success: true,
+            currentSeason,
+            rankList: list.map((item, index) => ({
+                rank: index + 1,
+                nickname: item.nickname,
+                score: item.score,
+                level: getLevel(item.score)
+            }))
         });
+    });
 });
 
-app.get('/api/user-score/:userId', (req, res) => {
-    db.get('SELECT score FROM users WHERE id = ?', [req.params.userId], 
-        (err, row) => {
-            if (err || !row) {
-                return res.json({ score: 0 });
-            }
-            res.json({ score: row.score });
-        });
-});
-
+// 启动服务
 app.listen(PORT, () => {
-    console.log(`服务器运行在端口 ${PORT}`);
+    console.log(`✅ 猜词游戏后端服务启动成功！`);
+    console.log(`📌 访问地址：http://localhost:${PORT}`);
+    console.log(`🤖 已启用AI智能语义相关度判断`);
+    console.log(`📅 当前赛季：${getCurrentSeason()}`);
 });
